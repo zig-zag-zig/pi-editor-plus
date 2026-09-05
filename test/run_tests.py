@@ -37,11 +37,12 @@ class Sess:
         if no_session:
             argv += ["--no-session", "--no-extensions"]
         argv += (args or [])
+        self._own_agentdir = agentdir is None
+        self._agentdir = agentdir or tempfile.mkdtemp(prefix="ep-sess-")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.environ["PI_EDITOR_PLUS_DEBUG"] = "1"
-            if agentdir:
-                os.environ["PI_CODING_AGENT_DIR"] = agentdir
+            os.environ["PI_CODING_AGENT_DIR"] = self._agentdir
             if extra_env:
                 os.environ.update(extra_env)
             os.execvp(argv[0], argv)
@@ -113,6 +114,8 @@ class Sess:
             os.kill(self.pid, signal.SIGKILL); os.waitpid(self.pid, 0)
         except Exception:
             pass
+        if self._own_agentdir:
+            shutil.rmtree(self._agentdir, ignore_errors=True)
 
 
 def t_click_to_caret():
@@ -140,7 +143,10 @@ def t_drag_select_copy_toast():
 
 def t_doubleclick_word():
     s = Sess(); s.send(b"alpha beta gamma", 0.5)
-    row = s.find_row("alpha beta gamma"); x = row is not None and s.screen.display[row].index("beta") + 2
+    row = s.find_row("alpha beta gamma")
+    if row is None:
+        check("double-click word", False, "text not found"); s.kill(); return
+    x = s.screen.display[row].index("beta") + 2
     y = row + 1
     s.click(x, y, 0.1); time.sleep(0.1); s.click(x, y, 0.4)
     s.send(b"X", 0.4)

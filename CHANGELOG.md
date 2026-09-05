@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.3.0] - 2026-09-01
+
+### Fixed
+- Middle-click paste no longer blocks the event loop (async `exec` instead of `execSync`).
+- Caret placement on click / undo / redo / selection-delete is now O(1) direct state access
+  instead of synchronous arrow-key replay (previously O(doc) per click — multi-second stalls
+  on huge pasted prompts).
+- Visual-row computation cached: no more fresh `Intl.Segmenter` per line per render, and
+  drag-motion events no longer re-wrap the whole document.
+- Fullscreen viewport hook no longer stacks across `/reload` (marker was on the wrong object;
+  now on the prototype where it is checked — frozen-prototype-safe inside try/catch).
+- Undo/redo history now has a hard 16 MB byte budget in addition to the 300-entry cap,
+  so very large prompts cannot pin gigabytes in the pi process.
+- Removed dead code after an unreachable `return true` in the click handler.
+- Draft no longer double-restores on startup (duplicate factory call removed).
+- DEBUG-only hex-dump trace no longer computed on every keystroke when DEBUG is off.
+
+### Changed
+- Test harness sessions now use isolated temp agent dirs (prevents the real draft file
+  from leaking into test editors).
+
 ## [1.2.0] - 2026-08-28
 
 ### Added

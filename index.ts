@@ -1,5 +1,5 @@
 /**
- * pi-editor-plus v1.2.0 — mouse click-to-caret AND drag-to-select for pi's
+ * pi-editor-plus v1.3.0 — mouse click-to-caret AND drag-to-select for pi's
  * prompt editor, in regular and fullscreen TUI modes.
  *
  * Formerly published as pi-mouse-caret (repo renamed; old links redirect).
@@ -39,7 +39,7 @@
  */
 
 import * as fs from "node:fs";
-import { execSync } from "node:child_process";
+import { exec } from "node:child_process";
 import * as path from "node:path";
 import {
 	CustomEditor,
@@ -61,7 +61,7 @@ import {
 	type EditorTheme,
 } from "@earendil-works/pi-tui";
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 // PI_MOUSE_CARET_DEBUG remains supported as a legacy alias.
 const DEBUG =
 	process.env.PI_EDITOR_PLUS_DEBUG === "1" || process.env.PI_MOUSE_CARET_DEBUG === "1";
@@ -79,10 +79,6 @@ const CPR_REPLY = /^\x1b\[(\d+);(\d+)R$/;
 const ALT_MOVE_RE = /^(?:\x1b\x1b\[|\x1b\[1;3)([AB])$/; // alt+up / alt+down
 const CLICK_BURST_MS = 800; // match/slightly exceed desktop double-click interval
 const DRAFT_DEBOUNCE_MS = 2500;
-const UP = "\x1b[A";
-const DOWN = "\x1b[B";
-const LEFT = "\x1b[D";
-const RIGHT = "\x1b[C";
 const SEL_START = "\x1b[7m";
 const SEL_END = "\x1b[27m";
 const SGR_RESET = "\x1b[0m";
@@ -115,10 +111,12 @@ interface HistoryEntry {
 	hardBoundary?: boolean;
 }
 
+const GRAPHEME_SEGMENTER =
+	typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+
 function segment(text: string): Grapheme[] {
-	if (typeof Intl.Segmenter === "function") {
-		return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)]
-			.map((item) => ({ segment: item.segment, index: item.index }));
+	if (GRAPHEME_SEGMENTER) {
+		return [...GRAPHEME_SEGMENTER.segment(text)].map((item) => ({ segment: item.segment, index: item.index }));
 	}
 	return [...text].map((segment, index) => ({ segment, index }));
 }
@@ -197,16 +195,6 @@ function visualOffsetAt(row: VisualRow, col: number): number {
 		column += visibleWidth(grapheme.segment);
 	}
 	return column;
-}
-
-/** Number of graphemes before a source column within a logical line. */
-function graphemesBefore(line: string, col: number): number {
-	let count = 0;
-	for (const grapheme of segment(line)) {
-		if (grapheme.index >= col) break;
-		count++;
-	}
-	return count;
 }
 
 function stripAnsi(text: string): string {
@@ -396,9 +384,9 @@ function installFullscreenHook(tui: TUI): void {
 		}
 		return original.call(this, data);
 	};
-	Object.defineProperty(patched, "__mouseCaretHook", { value: true });
 	try {
 		target.handleViewportInput = patched;
+		(target as { __mouseCaretHook: boolean }).__mouseCaretHook = true;
 		fullscreenHookInstalled = true;
 		debug("fullscreen mouse hook installed");
 	} catch {
@@ -424,6 +412,12 @@ class MouseCaretEditor extends CustomEditor {
 	/** Multi-click tracking for double/triple click word/line selection. */
 	private lastClickTrack: { ts: number; x: number; y: number; count: number } | undefined;
 	private draftTimer: ReturnType<typeof setTimeout> | undefined;
+	private rowsCache: VisualRow[] = [];
+	private rowsCacheText = "";
+	private rowsCacheWidth = -1;
+	private rowsCachePadding = -1;
+	private undoBytes = 0;
+	private redoBytes = 0;
 	private readonly tuiRef: TUI;
 
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
@@ -453,7 +447,7 @@ class MouseCaretEditor extends CustomEditor {
 			return lines;
 		}
 
-		const rows = visualRows(logicalLines, this.tuiRef.terminal.columns, this.getPaddingX());
+		const rows = this.getVisualRows();
 		const paddingX = this.getPaddingX();
 		const scrollOffset = Number(stripAnsi(lines[0] ?? "").match(/↑\s+(\d+)\s+more/u)?.[1] ?? 0);
 
@@ -542,14 +536,17 @@ class MouseCaretEditor extends CustomEditor {
 		// Middle button (mouse middle-click / three-finger tap): paste primary selection.
 		const isMiddle = (button & 3) === 1;
 		if (isMiddle) {
-			const text = this.readPrimarySelection();
-			debug(`middle-click at ${x},${y} primary=${JSON.stringify(text)}`);
-			if (text) {
+			const caretAtClick = { ...this.getCursor() };
+			debug(`middle-click at ${x},${y} -> async primary read`);
+			void this.readPrimarySelection().then((text) => {
+				if (!text || !this.focused || activeEditorRef().current !== this) return;
+				debug(`middle-click primary=${JSON.stringify(text.slice(0, 80))}`);
+				this.setCaret(caretAtClick.line, caretAtClick.col);
 				if (this.selectionRange()) this.deleteSelection();
 				this.insertTextAtCursor(text);
 				this.uiToast?.(`✓ pasted ${text.length} character${text.length === 1 ? "" : "s"}`);
 				this.tuiRef.requestRender();
-			}
+			});
 			return true;
 		}
 		if (isWheel || !isLeft) return true; // not ours: swallow in regular, unclaimed in fullscreen
@@ -570,12 +567,7 @@ class MouseCaretEditor extends CustomEditor {
 		this.clearSelection();
 		this.pendingClick = { x, y, multiClick: count >= 2 ? count : undefined };
 		this.tuiRef.terminal.write(CPR_QUERY);
-		return true;
-
-		this.clearSelection();
-		this.pendingClick = { x, y };
-		this.tuiRef.terminal.write(CPR_QUERY);
-		debug(`click x=${x} y=${y} -> CPR sent`);
+		debug(`click x=${x} y=${y} multiClick=${count >= 2} -> CPR sent`);
 		return true;
 	}
 
@@ -597,8 +589,7 @@ class MouseCaretEditor extends CustomEditor {
 	}
 
 	private applyClick(click: { x: number; y: number }, caretRow: number): void {
-		const lines = this.getLines();
-		const rows = visualRows(lines, this.tuiRef.terminal.columns, this.getPaddingX());
+		const rows = this.getVisualRows();
 		if (rows.length === 0) return;
 
 		const current = this.getCursor();
@@ -631,21 +622,10 @@ class MouseCaretEditor extends CustomEditor {
 		const targetIndex = Math.min(rows.length - 1, Math.max(click.y - anchor, 0));
 		const targetRow = rows[targetIndex]!;
 
-		// Vertical: one arrow per visual row (Editor applies its own wrap/scroll).
-		const dy = targetIndex - currentIndex;
-		const verticalKey = dy < 0 ? UP : DOWN;
-		for (let i = 0; i < Math.abs(dy); i++) super.handleInput(verticalKey);
-
-		// Horizontal: grapheme counts on the target logical line.
-		const afterVertical = this.getCursor();
-		const logicalLine = lines[targetRow.logicalLine] ?? "";
-		const here = graphemesBefore(logicalLine, afterVertical.col);
+		// Direct caret placement (no synchronous arrow replay — O(1) even for huge docs).
 		const visualOffset = Math.max(0, Math.min(click.x - 1 - this.getPaddingX(), visibleWidth(targetRow.text)));
-		const want = graphemesBefore(logicalLine, sourceColumnAt(targetRow, visualOffset));
-
-		const dx = want - here;
-		const horizontalKey = dx < 0 ? LEFT : RIGHT;
-		for (let i = 0; i < Math.abs(dx); i++) super.handleInput(horizontalKey);
+		const targetCol = sourceColumnAt(targetRow, visualOffset);
+		this.setCaret(targetRow.logicalLine, targetCol);
 
 		// A press starts a potential drag: anchor the selection at the caret.
 		this.dragging = true;
@@ -659,13 +639,13 @@ class MouseCaretEditor extends CustomEditor {
 
 		debug(
 			`click (${click.x},${click.y}) caretRow=${caretRow} anchor=${anchor} scroll=${scrollOffset} ` +
-			`dy=${dy} dx=${dx} cursor=${JSON.stringify(this.getCursor())}`,
+			`cursor=${JSON.stringify(this.getCursor())}`,
 		);
 		this.tuiRef.requestRender();
 	}
 
 	private extendSelection(x: number, y: number): void {
-		const rows = visualRows(this.getLines(), this.tuiRef.terminal.columns, this.getPaddingX());
+		const rows = this.getVisualRows();
 		if (rows.length === 0 || this.dragAnchorRow === undefined || !this.dragAnchor) return;
 		const index = Math.min(rows.length - 1, Math.max(y - this.dragAnchorRow, 0));
 		const row = rows[index]!;
@@ -717,21 +697,20 @@ class MouseCaretEditor extends CustomEditor {
 					];
 		this.selection = undefined;
 		this.setText(rebuilt.join("\n"));
-		// setText leaves the caret at the end; walk it to the selection start.
-		const target = { line: selection.line, col: selection.col };
-		const cursor = this.getCursor();
-		for (let i = 0; i < cursor.line - target.line; i++) super.handleInput(UP);
-		const after = this.getCursor();
-		const line = this.getLines()[target.line] ?? "";
-		const dx = graphemesBefore(line, target.col) - graphemesBefore(line, after.col);
-		for (let i = 0; i < Math.abs(dx); i++) super.handleInput(dx < 0 ? LEFT : RIGHT);
+		// setText leaves the caret at the end; place it directly at the selection start.
+		this.moveCaretTo({ line: selection.line, col: selection.col });
 	}
 
 	/** Replace-on-type and clear-on-move for the active selection, plus undo/redo keys. */
 	handleInput(data: string): void {
-		const traced = [...data].map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
-		if (DEBUG && !/[\x20-\x7e]/u.test(data)) debug(`handleInput bytes=[${traced}]`);
-		else if (DEBUG) debug(`handleInput ${JSON.stringify(data)}`);
+		if (DEBUG) {
+			if (!/[\x20-\x7e]/u.test(data)) {
+				const traced = [...data].map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
+				debug(`handleInput bytes=[${traced}]`);
+			} else {
+				debug(`handleInput ${JSON.stringify(data)}`);
+			}
+		}
 		if (matchesKey(data, "ctrl+z")) {
 			debug("ctrl+z detected -> undoOnce");
 			this.undoOnce();
@@ -800,6 +779,51 @@ class MouseCaretEditor extends CustomEditor {
 
 	private static readonly BURST_MS = 450;
 	private static readonly MAX_HISTORY = 300;
+	/** Hard cap on retained undo/redo text (approximation of UTF-16 units). */
+	private static readonly MAX_UNDO_BYTES = 16 * 1024 * 1024;
+
+	private pushUndo(entry: HistoryEntry): void {
+		this.caretUndoStack.push(entry);
+		this.undoBytes += entry.text.length;
+		while (
+			this.caretUndoStack.length > MouseCaretEditor.MAX_HISTORY ||
+			this.undoBytes > MouseCaretEditor.MAX_UNDO_BYTES
+		) {
+			const old = this.caretUndoStack.shift();
+			if (!old) break;
+			this.undoBytes -= old.text.length;
+		}
+	}
+
+	private popUndo(): HistoryEntry | undefined {
+		const entry = this.caretUndoStack.pop();
+		if (entry) this.undoBytes -= entry.text.length;
+		return entry;
+	}
+
+	private pushRedo(entry: HistoryEntry): void {
+		this.caretRedoStack.push(entry);
+		this.redoBytes += entry.text.length;
+		while (
+			this.caretRedoStack.length > MouseCaretEditor.MAX_HISTORY ||
+			this.redoBytes > MouseCaretEditor.MAX_UNDO_BYTES
+		) {
+			const old = this.caretRedoStack.shift();
+			if (!old) break;
+			this.redoBytes -= old.text.length;
+		}
+	}
+
+	private popRedo(): HistoryEntry | undefined {
+		const entry = this.caretRedoStack.pop();
+		if (entry) this.redoBytes -= entry.text.length;
+		return entry;
+	}
+
+	private clearRedo(): void {
+		this.caretRedoStack = [];
+		this.redoBytes = 0;
+	}
 
 	private snapshot(): HistoryEntry {
 		return { text: this.getText(), cursor: { ...this.getCursor() }, ts: Date.now() };
@@ -818,9 +842,8 @@ class MouseCaretEditor extends CustomEditor {
 
 		// A new burst always records the state BEFORE its first keystroke.
 		if (!mergesWithPrevious) {
-			this.caretUndoStack.push({ ...before, ts: now, hardBoundary: isStructural });
-			if (this.caretUndoStack.length > MouseCaretEditor.MAX_HISTORY) this.caretUndoStack.shift();
-			this.caretRedoStack = [];
+			this.pushUndo({ ...before, ts: now, hardBoundary: isStructural });
+			this.clearRedo();
 		}
 		this.lastEditAt = now;
 		this.lastEditWasTyping = isTyping;
@@ -831,22 +854,15 @@ class MouseCaretEditor extends CustomEditor {
 	private applyHistory(entry: HistoryEntry): void {
 		this.selection = undefined;
 		this.setText(entry.text); // single-step for pi's own ctrl+- undo too
-		const target = entry.cursor;
-		const cursor = this.getCursor();
-		for (let i = 0; i < cursor.line - target.line; i++) super.handleInput(UP);
-		for (let i = 0; i < target.line - cursor.line; i++) super.handleInput(DOWN);
-		const after = this.getCursor();
-		const line = this.getLines()[target.line] ?? "";
-		const dx = graphemesBefore(line, target.col) - graphemesBefore(line, after.col);
-		for (let i = 0; i < Math.abs(dx); i++) super.handleInput(dx < 0 ? LEFT : RIGHT);
+		this.moveCaretTo(entry.cursor);
 		this.tuiRef.requestRender();
 	}
 
 	undoOnce(): boolean {
 		while (this.caretUndoStack.length > 0) {
-			const candidate = this.caretUndoStack.pop()!;
+			const candidate = this.popUndo()!;
 			if (candidate.text === this.getText()) continue; // skip no-op anchors
-			this.caretRedoStack.push(this.snapshot());
+			this.pushRedo(this.snapshot());
 			this.applyHistory(candidate);
 			debug(`undo -> ${JSON.stringify(candidate.cursor)} text=${candidate.text.length} chars`);
 			return true;
@@ -856,12 +872,12 @@ class MouseCaretEditor extends CustomEditor {
 	}
 
 	redoOnce(): boolean {
-		const next = this.caretRedoStack.pop();
+		const next = this.popRedo();
 		if (!next) {
 			debug("redo: nothing to redo");
 			return false;
 		}
-		this.caretUndoStack.push({ ...this.snapshot(), ts: Date.now() });
+		this.pushUndo({ ...this.snapshot(), ts: Date.now() });
 		this.applyHistory(next);
 		debug(`redo -> ${JSON.stringify(next.cursor)} text=${next.text.length} chars`);
 		return true;
@@ -871,15 +887,32 @@ class MouseCaretEditor extends CustomEditor {
 	// Selection via keyboard / multi-click, line ops, history, draft
 	// =========================================================================
 
-	/** Walk the caret to an absolute logical position using arrow keys. */
+	/** Place the caret directly (no synchronous arrow replay — O(1) even for huge docs). */
+	private setCaret(line: number, col: number): void {
+		const state = (this as unknown as { state: { lines: string[]; cursorLine: number; cursorCol: number; preferredVisualCol: number | null; snappedFromCursorCol: number | null } }).state;
+		state.cursorLine = Math.max(0, Math.min(line, state.lines.length - 1));
+		state.cursorCol = Math.max(0, Math.min(col, (state.lines[state.cursorLine] ?? "").length));
+		state.preferredVisualCol = null;
+		state.snappedFromCursorCol = null;
+	}
+
+	/** Cached visual-row map: recomputed only when text/width/padding changes. */
+	private getVisualRows(): VisualRow[] {
+		const text = this.getText();
+		const width = this.tuiRef.terminal.columns;
+		const paddingX = this.getPaddingX();
+		if (this.rowsCacheText !== text || this.rowsCacheWidth !== width || this.rowsCachePadding !== paddingX) {
+			this.rowsCache = visualRows(this.getLines(), width, paddingX);
+			this.rowsCacheText = text;
+			this.rowsCacheWidth = width;
+			this.rowsCachePadding = paddingX;
+		}
+		return this.rowsCache;
+	}
+
+	/** Walk the caret to an absolute logical position (direct placement). */
 	private moveCaretTo(target: { line: number; col: number }): void {
-		const cursor = this.getCursor();
-		for (let i = 0; i < cursor.line - target.line; i++) super.handleInput(UP);
-		for (let i = 0; i < target.line - cursor.line; i++) super.handleInput(DOWN);
-		const after = this.getCursor();
-		const line = this.getLines()[target.line] ?? "";
-		const dx = graphemesBefore(line, target.col) - graphemesBefore(line, after.col);
-		for (let i = 0; i < Math.abs(dx); i++) super.handleInput(dx < 0 ? LEFT : RIGHT);
+		this.setCaret(target.line, target.col);
 	}
 
 	private setSelectionNormalized(a: { line: number; col: number }, b: { line: number; col: number }): void {
@@ -961,9 +994,8 @@ class MouseCaretEditor extends CustomEditor {
 
 	/** Shared tail for direct state edits: undo anchor, change notify, redraw. */
 	private afterDirectEdit(before: { text: string; cursor: { line: number; col: number } }): void {
-		this.caretUndoStack.push({ ...before, ts: Date.now(), hardBoundary: true });
-		if (this.caretUndoStack.length > MouseCaretEditor.MAX_HISTORY) this.caretUndoStack.shift();
-		this.caretRedoStack = [];
+		this.pushUndo({ ...before, ts: Date.now(), hardBoundary: true });
+		this.clearRedo();
 		this.lastEditAt = Date.now();
 		this.lastEditWasTyping = false;
 		this.onChange?.(this.getText());
@@ -974,18 +1006,17 @@ class MouseCaretEditor extends CustomEditor {
 	// Draft persistence (crash / accidental-clear recovery)
 	// =========================================================================
 
-	/** Read the X11/Wayland primary selection (middle-click source). Text only. */
-	private readPrimarySelection(): string | undefined {
-		const tryCmd = (cmd: string): string | undefined => {
-			try {
-				const out = execSync(cmd, { timeout: 600, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-				return out && !out.includes("\0") ? out : undefined;
-			} catch {
-				return undefined;
-			}
-		};
+	/** Read the X11/Wayland primary selection (middle-click source), async. Text only. */
+	private readPrimarySelection(): Promise<string | undefined> {
+		const tryCmd = (cmd: string): Promise<string | undefined> =>
+			new Promise((resolve) => {
+				exec(cmd, { timeout: 600, encoding: "utf8" }, (error, stdout) => {
+					if (error || stdout.includes("\0")) resolve(undefined);
+					else resolve(stdout);
+				});
+			});
 		// Wayland first, then X11.
-		return tryCmd("wl-paste --primary --no-newline") ?? tryCmd("xclip -o -selection primary");
+		return (async () => (await tryCmd("wl-paste --primary --no-newline")) ?? (await tryCmd("xclip -o -selection primary")))();
 	}
 
 	private scheduleDraftSave(): void {
@@ -1048,9 +1079,9 @@ class MouseCaretEditor extends CustomEditor {
 				if (!picked) return;
 				const before = this.snapshot();
 				this.selection = undefined;
-						this.setText(picked);
-				this.caretUndoStack.push({ ...before, ts: Date.now(), hardBoundary: true });
-				this.caretRedoStack = [];
+				this.setText(picked);
+				this.pushUndo({ ...before, ts: Date.now(), hardBoundary: true });
+				this.clearRedo();
 				this.moveCaretTo({ line: this.getLines().length - 1, col: (this.getLines()[this.getLines().length - 1] ?? "").length });
 				this.tuiRef.requestRender();
 			})
@@ -1151,7 +1182,6 @@ export default function (pi: ExtensionAPI) {
 				if (!editor) return;
 				if (editor.restoreDraftIfAny()) showToast("draft recovered — ctrl+z dismisses");
 			}, 0);
-			if (editor.restoreDraftIfAny()) showToast("draft recovered — ctrl+z dismisses");
 			return editor;
 		});
 
