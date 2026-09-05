@@ -1,5 +1,5 @@
 /**
- * pi-editor-plus v1.0.0 — mouse click-to-caret AND drag-to-select for pi's
+ * pi-editor-plus v1.1.0 — mouse click-to-caret AND drag-to-select for pi's
  * prompt editor, in regular and fullscreen TUI modes.
  *
  * Formerly published as pi-mouse-caret (repo renamed; old links redirect).
@@ -42,7 +42,7 @@ import { appendFileSync } from "node:fs";
 import { CustomEditor, copyToClipboard, type ExtensionAPI, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { matchesKey, visibleWidth, type TUI, type EditorTheme } from "@earendil-works/pi-tui";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 // PI_MOUSE_CARET_DEBUG remains supported as a legacy alias.
 const DEBUG =
 	process.env.PI_EDITOR_PLUS_DEBUG === "1" || process.env.PI_MOUSE_CARET_DEBUG === "1";
@@ -318,6 +318,8 @@ class MouseCaretEditor extends CustomEditor {
 	private caretRedoStack: HistoryEntry[] = [];
 	private lastEditAt = 0;
 	private lastEditWasTyping = false;
+	/** Copy-feedback toast hook, assigned by the extension factory per session. */
+	reportCopied?: (chars: number) => void;
 	private readonly tuiRef: TUI;
 
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
@@ -369,12 +371,22 @@ class MouseCaretEditor extends CustomEditor {
 
 		for (let index = 1; index < bottomBorder; index++) {
 			const row = rows[scrollOffset + index - 1];
-			if (!row || row.logicalLine < selection.line || row.logicalLine > selection.endLine) continue;
+			if (!row || row.logicalLine < selection.line || row.logicalLine > selection.endLine) {
+				debug(`selrow ${index}: skip (row=${row ? `${row.logicalLine}:${row.startCol}-${row.endCol}` : "none"} sel=${JSON.stringify(selection)})`);
+				continue;
+			}
 			const startCol = row.logicalLine === selection.line ? Math.max(selection.col, row.startCol) : row.startCol;
 			const endCol = row.logicalLine === selection.endLine ? Math.min(selection.endCol, row.endCol) : row.endCol;
-			if (startCol >= endCol) continue;
-			const fromCol = paddingX + visualOffsetAt(row, startCol);
-			const toCol = paddingX + visualOffsetAt(row, endCol);
+			if (startCol >= endCol) {
+				debug(`selrow ${index}: empty range ${startCol}..${endCol}`);
+				continue;
+			}
+			// startCol/endCol are logical-line source columns; the chunk only spans
+			// [row.startCol, row.endCol] — convert to chunk-relative first, or the
+			// visible-offset walk overflows continuation chunks and paints nothing.
+			const fromCol = paddingX + visualOffsetAt(row, Math.max(0, startCol - row.startCol));
+			const toCol = paddingX + visualOffsetAt(row, Math.max(0, Math.min(endCol, row.endCol) - row.startCol));
+			debug(`selrow ${index}: line=${row.logicalLine} src=${startCol}..${endCol} vis=${fromCol}..${toCol} rowtext=${JSON.stringify(row.text.slice(0, 30))}`);
 			lines[index] = injectSelection(lines[index]!, fromCol, toCol);
 		}
 		return lines;
@@ -549,6 +561,7 @@ class MouseCaretEditor extends CustomEditor {
 						...lines.slice(selection.line + 1, selection.endLine),
 						(lines[selection.endLine] ?? "").slice(0, selection.endCol),
 					].join("\n");
+		if (this.reportCopied) this.reportCopied(text.length);
 		void copyToClipboard(text).catch(() => {});
 	}
 
@@ -738,6 +751,20 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 		debug("extension session_start");
 
+		// Terminal-style feedback after select-copy: brief footer status toast,
+		// auto-cleared so it never lingers. Assigned per-instance (a prototype
+		// assignment would be shadowed by the class field declaration).
+		let toastTimer: ReturnType<typeof setTimeout> | undefined;
+		const copiedToast = (chars: number) => {
+			try {
+				ctx.ui.setStatus("pi-editor-plus", `✓ copied ${chars} character${chars === 1 ? "" : "s"}`);
+				if (toastTimer) clearTimeout(toastTimer);
+				toastTimer = setTimeout(() => {
+					try { ctx.ui.setStatus("pi-editor-plus", undefined); } catch {}
+				}, 2000);
+			} catch {}
+		};
+
 		if (upstreamMouseApiDetected()) {
 			debug("native editor mouse API detected - staying passive");
 			try { ctx.ui.notify("pi-editor-plus: pi now has native mouse support, extension disabled", "info"); } catch {}
@@ -747,6 +774,7 @@ export default function (pi: ExtensionAPI) {
 		let editor: MouseCaretEditor | undefined;
 		ctx.ui.setEditorComponent((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => {
 			editor = new MouseCaretEditor(tui, theme, keybindings);
+			editor.reportCopied = copiedToast;
 			activeEditorRef().current = editor;
 			return editor;
 		});
