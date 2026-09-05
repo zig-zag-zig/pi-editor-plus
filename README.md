@@ -5,7 +5,7 @@ Editing upgrades for [pi](https://github.com/earendil-works/pi)'s prompt editor 
 - **Click to move the caret** anywhere inside the input editor
 - **Drag to select** editor text (highlighted), with terminal-style *select = copy* on release
 - **Double-click** selects a word, **triple-click** selects the whole line
-- **Ctrl+Z / Ctrl+Y** undo and redo with caret restoration
+- **Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y** undo and redo with caret restoration
 - **Draft persistence** — your prompt survives crashes and accidental clears
 - **Ctrl+R** fuzzy-search through past prompts
 - Works in **both TUI modes**: `regular` (default) and `fullscreen`
@@ -46,19 +46,28 @@ No configuration needed. Start pi normally (`pi` for regular mode or
 
 ## Usage
 
+### Mouse
+
 | Action | Effect |
 |---|---|
 | Left-click in editor | Move caret to clicked position |
 | Press, drag, release | Select text (highlighted); copied to clipboard on release |
-| Double-click / triple-click | Select word / select whole line (also copied, with toast) |
-| Type / Backspace / Delete with selection | Replace / delete selection |
-| Enter / paste with selection | Newline / pasted text replaces the selection |
-| Arrow keys / Home / End | Clear selection, move caret |
+| Double-click | Select word (also copied, with toast) |
+| Triple-click | Select whole logical line (also copied, with toast) |
+| Middle-click / three-finger tap | Paste clipboard (falls back to primary selection) at the clicked position |
+| Click outside the editor | Clears the editor selection; transcript keeps native behavior |
+
+### Keyboard
+
+| Keys | Effect |
+|---|---|
+| **Ctrl+Z** | Undo (typing bursts collapse to one step; pastes and selection-replacements are single steps) |
+| **Ctrl+Y** or **Ctrl+Shift+Z** | Redo |
 | Ctrl+A | Select all |
-| **Ctrl+Z** / **Ctrl+Y** | **Undo** / **redo** (typing bursts collapse to one step; pastes and selection-replacements are single steps) |
 | Ctrl+D (editor has text) | Duplicate current line |
 | Ctrl+R | Fuzzy-search past prompts, apply picked entry |
-| Draft recovery | If pi crashed or you cleared without submitting, the prompt is restored on next launch (with toast) |
+| Enter / paste with active selection | Newline / pasted text replaces the selection |
+| Arrow keys / Home / End | Clear selection, move caret |
 
 > **Note on Ctrl+Z:** pi binds `Ctrl+Z` to *suspend-to-background*. This extension
 > takes that chord over for undo inside the prompt. If you rely on suspending,
@@ -66,7 +75,6 @@ No configuration needed. Start pi normally (`pi` for regular mode or
 > ```json
 > { "app.suspend": ["ctrl+alt+z"] }
 > ```
-| Click outside the editor | Nothing (transcript keeps native behavior) |
 
 ## How it works
 
@@ -142,7 +150,7 @@ When it detects one it notifies ("pi now has native mouse support, extension dis
 and stays passive. At that point remove the extension:
 
 ```bash
-pi remove npm:pi-mouse-caret   # if you installed the old-named package
+pi remove npm:pi-editor-plus
 ```
 
 ## Debugging
