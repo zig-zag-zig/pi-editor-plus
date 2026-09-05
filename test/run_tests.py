@@ -183,13 +183,10 @@ def t_ctrl_a():
 
 def t_line_ops():
     s = Sess(); s.send(b"\x1b[200~one\ntwo\x1b[201~", 0.8)
-    s.send(b"\x1b[A", 0.3)          # up to 'one'
-    s.send(b"\x1b[1;3B", 0.35)      # alt+down swap
-    swapped = s.editor_rows()[:1] == ["two"]
-    s.send(b"\x04", 0.4)            # ctrl+d duplicate
-    dup = len([r for r in s.editor_rows() if r]) == 3
-    check("alt+down swap line", swapped, s.editor_rows())
-    check("ctrl+d duplicate line", dup, s.editor_rows())
+    s.send(b"\x04", 0.4)            # ctrl+d duplicate current line
+    rows = s.editor_rows()
+    dup = len([r for r in rows if r.strip()]) == 3
+    check("ctrl+d duplicate line", dup and rows[0] == "one" and rows[1] == "two", rows)
     s.kill()
 
 

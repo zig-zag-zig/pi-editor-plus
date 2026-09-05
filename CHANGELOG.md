@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.2] - 2026-09-02
+
+### Fixed
+- Middle-click paste now reads the regular clipboard first (matching our
+  select=copy behavior), falling back to the primary selection. Fixes a
+  regression where the async reader's Promise was inserted as text, and
+  the empty-primary no-op on Wayland.
+- README synced with shipped features (removed Shift+arrows keyboard
+  selection and Alt+Up/Down line-swap rows, added draft persistence and
+  middle-click paste, documented wl-clipboard/xclip dependency).
+
+### Removed
+- Alt+Up/Down line-swap (chord collides with pi's native message dequeue).
 ## [1.3.1] - 2026-09-02
 
 ### Removed

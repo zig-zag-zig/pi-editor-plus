@@ -1,10 +1,13 @@
 # pi-editor-plus
 
-Mouse support for [pi](https://github.com/earendil-works/pi)'s prompt editor that upstream doesn't have yet:
+Editing upgrades for [pi](https://github.com/earendil-works/pi)'s prompt editor that upstream doesn't have yet:
 
 - **Click to move the caret** anywhere inside the input editor
 - **Drag to select** editor text (highlighted), with terminal-style *select = copy* on release
-- **Typing / Backspace / Delete** replaces the selection
+- **Double-click** selects a word, **triple-click** selects the whole line
+- **Ctrl+Z / Ctrl+Y** undo and redo with caret restoration
+- **Draft persistence** — your prompt survives crashes and accidental clears
+- **Ctrl+R** fuzzy-search through past prompts
 - Works in **both TUI modes**: `regular` (default) and `fullscreen`
 
 Upstream pi has no mouse API for the editor — the feature request
@@ -12,7 +15,7 @@ Upstream pi has no mouse API for the editor — the feature request
 was auto-closed without implementation. This extension adds it from the outside,
 without patching pi's source.
 
-Tested against pi `0.84.3`.
+Tested against pi `0.84.3`–`0.84.4`.
 
 ## Install
 
@@ -47,16 +50,15 @@ No configuration needed. Start pi normally (`pi` for regular mode or
 |---|---|
 | Left-click in editor | Move caret to clicked position |
 | Press, drag, release | Select text (highlighted); copied to clipboard on release |
+| Double-click / triple-click | Select word / select whole line (also copied, with toast) |
 | Type / Backspace / Delete with selection | Replace / delete selection |
+| Enter / paste with selection | Newline / pasted text replaces the selection |
 | Arrow keys / Home / End | Clear selection, move caret |
-| Double-click / triple-click | Select word / select whole line |
-| Shift+arrows, Shift+Home/End, Ctrl+Shift+arrows | Keyboard selection (extends from caret) |
 | Ctrl+A | Select all |
-| **Ctrl+Z** / **Ctrl+Y** | **Undo** / **redo** (typing bursts collapse to one step) |
+| **Ctrl+Z** / **Ctrl+Y** | **Undo** / **redo** (typing bursts collapse to one step; pastes and selection-replacements are single steps) |
 | Ctrl+D (editor has text) | Duplicate current line |
 | Ctrl+R | Fuzzy-search past prompts, apply picked entry |
-| **Ctrl+Z** | **Undo** last edit (typing bursts collapse to one step; pastes and selection-replacements are single steps) |
-| **Ctrl+Shift+Z** | **Redo** |
+| Draft recovery | If pi crashed or you cleared without submitting, the prompt is restored on next launch (with toast) |
 
 > **Note on Ctrl+Z:** pi binds `Ctrl+Z` to *suspend-to-background*. This extension
 > takes that chord over for undo inside the prompt. If you rely on suspending,
@@ -93,6 +95,10 @@ No configuration needed. Start pi normally (`pi` for regular mode or
   to its literal content (an upstream `setCursor()`/selection API would fix this).
 - Row mapping re-implements pi's word wrap closely but not perfectly; CJK-heavy lines
   may be off by a row/column.
+- **Middle-click paste** reads the clipboard/primary selection via
+  `wl-paste` (Wayland) or `xclip` (X11). If neither is installed, middle-click
+  does nothing. Three-finger tap must be mapped to middle-button by your
+  touchpad settings (KDE: Touchpad → Tap Actions).
 - If you rebind editor cursor keys in `keybindings.json`, synthetic movement follows
   your bindings (removing plain `up/down/left/right` will break caret motion).
 
@@ -173,6 +179,6 @@ npm test          # == python3 test/run_tests.py
 ```
 
 Covers: click-to-caret, drag-select + copy toast, double/triple-click, undo/redo,
-Ctrl+A, Alt+↑/↓ + Ctrl+D line ops, draft crash-recovery, and middle-click paste.
+Ctrl+A, Ctrl+D duplicate line, draft crash-recovery, and middle-click paste.
 The Ctrl+R history test self-skips when pi's session loader can't seed history in a
 headless environment (it works in a live session with real history).

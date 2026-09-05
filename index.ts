@@ -1,5 +1,5 @@
 /**
- * pi-editor-plus v1.3.1 — mouse click-to-caret AND drag-to-select for pi's
+ * pi-editor-plus v1.3.2 — mouse click-to-caret AND drag-to-select for pi's
  * prompt editor, in regular and fullscreen TUI modes.
  *
  * Formerly published as pi-mouse-caret (repo renamed; old links redirect).
@@ -61,7 +61,7 @@ import {
 	type EditorTheme,
 } from "@earendil-works/pi-tui";
 
-const VERSION = "1.3.1";
+const VERSION = "1.3.2";
 // PI_MOUSE_CARET_DEBUG remains supported as a legacy alias.
 const DEBUG =
 	process.env.PI_EDITOR_PLUS_DEBUG === "1" || process.env.PI_MOUSE_CARET_DEBUG === "1";
@@ -537,7 +537,7 @@ class MouseCaretEditor extends CustomEditor {
 		if (isMiddle) {
 			const caretAtClick = { ...this.getCursor() };
 			debug(`middle-click at ${x},${y} -> async primary read`);
-			void this.readPrimarySelection().then((text) => {
+			void this.readPasteSource().then((text) => {
 				if (!text || !this.focused || activeEditorRef().current !== this) return;
 				debug(`middle-click primary=${JSON.stringify(text.slice(0, 80))}`);
 				this.setCaret(caretAtClick.line, caretAtClick.col);
@@ -994,6 +994,21 @@ class MouseCaretEditor extends CustomEditor {
 			});
 		// Wayland first, then X11.
 		return (async () => (await tryCmd("wl-paste --primary --no-newline")) ?? (await tryCmd("xclip -o -selection primary")))();
+	}
+
+	/** Read the regular clipboard — matches what our drag-select copies to. */
+	private readClipboard(): Promise<string | undefined> {
+		return new Promise((resolve) => {
+			exec("wl-paste --no-newline", { timeout: 600, encoding: "utf8" }, (error, stdout) => {
+				if (error || !stdout || stdout.includes("\0")) resolve(undefined);
+				else resolve(stdout);
+			});
+		});
+	}
+
+	/** Paste source for middle-click: clipboard first, then primary selection. */
+	private readPasteSource(): Promise<string | undefined> {
+		return (async () => (await this.readClipboard()) ?? (await this.readPrimarySelection()))();
 	}
 
 	private scheduleDraftSave(): void {
