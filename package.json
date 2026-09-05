@@ -1,6 +1,6 @@
 {
   "name": "pi-editor-plus",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Editing upgrades for the pi coding agent prompt editor: mouse click-to-caret, drag-to-select with copy, and undo/redo (regular + fullscreen TUI)",
   "type": "module",
   "license": "MIT",

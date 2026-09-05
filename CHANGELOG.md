@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.1] - 2026-09-02
+
+### Removed
+- Alt+Up/Down line-swap: the chord collides with pi's native "restore queued
+  messages" binding (`app.message.dequeue`, default `alt+up`). The dequeue
+  shortcut works again.
 ## [1.3.0] - 2026-09-01
 
 ### Fixed

@@ -1,5 +1,5 @@
 /**
- * pi-editor-plus v1.3.0 — mouse click-to-caret AND drag-to-select for pi's
+ * pi-editor-plus v1.3.1 — mouse click-to-caret AND drag-to-select for pi's
  * prompt editor, in regular and fullscreen TUI modes.
  *
  * Formerly published as pi-mouse-caret (repo renamed; old links redirect).
@@ -61,7 +61,7 @@ import {
 	type EditorTheme,
 } from "@earendil-works/pi-tui";
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 // PI_MOUSE_CARET_DEBUG remains supported as a legacy alias.
 const DEBUG =
 	process.env.PI_EDITOR_PLUS_DEBUG === "1" || process.env.PI_MOUSE_CARET_DEBUG === "1";
@@ -76,7 +76,6 @@ const CPR_QUERY = "\x1b[6n"; // "report cursor position" -> ESC[row;colR
 const SGR_MOUSE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
 
 const CPR_REPLY = /^\x1b\[(\d+);(\d+)R$/;
-const ALT_MOVE_RE = /^(?:\x1b\x1b\[|\x1b\[1;3)([AB])$/; // alt+up / alt+down
 const CLICK_BURST_MS = 800; // match/slightly exceed desktop double-click interval
 const DRAFT_DEBOUNCE_MS = 2500;
 const SEL_START = "\x1b[7m";
@@ -733,11 +732,6 @@ class MouseCaretEditor extends CustomEditor {
 				this.selectAll();
 				return;
 			}
-			const altMove = ALT_MOVE_RE.exec(data);
-			if (altMove) {
-				this.moveLine(altMove[1] === "A" ? -1 : 1);
-				return;
-			}
 			// Ctrl+D duplicates the current line (only when there is text;
 			// on an empty editor Ctrl+D keeps its native exit behavior).
 			if (matchesKey(data, "ctrl+d") && this.getText().length > 0) {
@@ -962,23 +956,6 @@ class MouseCaretEditor extends CustomEditor {
 			void copyToClipboard(logical.slice(span.s, span.e)).catch(() => {});
 		}
 		this.tuiRef.requestRender();
-	}
-
-	/** Alt+Up/Down: swap the current logical line with its neighbor. */
-	private moveLine(dir: -1 | 1): void {
-		this.clearSelection();
-		const state = (this as unknown as { state: { lines: string[]; cursorLine: number; cursorCol: number; preferredVisualCol: number | null; snappedFromCursorCol: number | null } }).state;
-		const before = this.snapshot();
-		const l = state.cursorLine;
-		const t = l + dir;
-		if (t < 0 || t >= state.lines.length) return;
-		const tmp = state.lines[l]!;
-		state.lines[l] = state.lines[t]!;
-		state.lines[t] = tmp;
-		state.cursorLine = t;
-		state.cursorCol = Math.min(state.cursorCol, state.lines[t]!.length);
-		state.preferredVisualCol = null;
-		this.afterDirectEdit(before);
 	}
 
 	/** Ctrl+D: duplicate the current logical line below, caret moves to the copy. */

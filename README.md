@@ -53,7 +53,6 @@ No configuration needed. Start pi normally (`pi` for regular mode or
 | Shift+arrows, Shift+Home/End, Ctrl+Shift+arrows | Keyboard selection (extends from caret) |
 | Ctrl+A | Select all |
 | **Ctrl+Z** / **Ctrl+Y** | **Undo** / **redo** (typing bursts collapse to one step) |
-| Alt+Up/Down | Swap current line with neighbor |
 | Ctrl+D (editor has text) | Duplicate current line |
 | Ctrl+R | Fuzzy-search past prompts, apply picked entry |
 | **Ctrl+Z** | **Undo** last edit (typing bursts collapse to one step; pastes and selection-replacements are single steps) |
