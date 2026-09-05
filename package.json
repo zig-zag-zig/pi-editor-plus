@@ -1,0 +1,38 @@
+{
+  "name": "pi-editor-plus",
+  "version": "1.0.0",
+  "description": "Editing upgrades for the pi coding agent prompt editor: mouse click-to-caret, drag-to-select with copy, and undo/redo (regular + fullscreen TUI)",
+  "type": "module",
+  "license": "MIT",
+  "author": "zig-zag-zig",
+  "homepage": "https://github.com/zig-zag-zig/pi-editor-plus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zig-zag-zig/pi-editor-plus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zig-zag-zig/pi-editor-plus/issues"
+  },
+  "keywords": [
+    "pi-extension",
+    "pi-coding-agent",
+    "mouse",
+    "caret",
+    "selection",
+    "tui"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
