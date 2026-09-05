@@ -49,6 +49,13 @@ No configuration needed. Start pi normally (`pi` for regular mode or
 | Press, drag, release | Select text (highlighted); copied to clipboard on release |
 | Type / Backspace / Delete with selection | Replace / delete selection |
 | Arrow keys / Home / End | Clear selection, move caret |
+| Double-click / triple-click | Select word / select whole line |
+| Shift+arrows, Shift+Home/End, Ctrl+Shift+arrows | Keyboard selection (extends from caret) |
+| Ctrl+A | Select all |
+| **Ctrl+Z** / **Ctrl+Y** | **Undo** / **redo** (typing bursts collapse to one step) |
+| Alt+Up/Down | Swap current line with neighbor |
+| Ctrl+D (editor has text) | Duplicate current line |
+| Ctrl+R | Fuzzy-search past prompts, apply picked entry |
 | **Ctrl+Z** | **Undo** last edit (typing bursts collapse to one step; pastes and selection-replacements are single steps) |
 | **Ctrl+Shift+Z** | **Redo** |
 
@@ -156,3 +163,17 @@ bun x tsc --noEmit --strict --skipLibCheck --target es2022 \
 ## License
 
 [MIT](./LICENSE)
+
+
+## Tests
+
+End-to-end tests drive a real `pi` in a pseudo-terminal and assert on the screen:
+
+```bash
+npm test          # == python3 test/run_tests.py
+```
+
+Covers: click-to-caret, drag-select + copy toast, double/triple-click, undo/redo,
+Ctrl+A, Alt+↑/↓ + Ctrl+D line ops, draft crash-recovery, and middle-click paste.
+The Ctrl+R history test self-skips when pi's session loader can't seed history in a
+headless environment (it works in a live session with real history).

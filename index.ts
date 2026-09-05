@@ -1,5 +1,5 @@
 /**
- * pi-editor-plus v1.1.0 — mouse click-to-caret AND drag-to-select for pi's
+ * pi-editor-plus v1.2.0 — mouse click-to-caret AND drag-to-select for pi's
  * prompt editor, in regular and fullscreen TUI modes.
  *
  * Formerly published as pi-mouse-caret (repo renamed; old links redirect).
@@ -38,24 +38,47 @@
  *             (legacy alias: PI_MOUSE_CARET_DEBUG)
  */
 
-import { appendFileSync } from "node:fs";
-import { CustomEditor, copyToClipboard, type ExtensionAPI, type KeybindingsManager } from "@earendil-works/pi-coding-agent";
-import { matchesKey, visibleWidth, type TUI, type EditorTheme } from "@earendil-works/pi-tui";
+import * as fs from "node:fs";
+import { execSync } from "node:child_process";
+import * as path from "node:path";
+import {
+	CustomEditor,
+	copyToClipboard,
+	getAgentDir,
+	getSelectListTheme,
+	type ExtensionAPI,
+	type ExtensionUIContext,
+	type KeybindingsManager,
+} from "@earendil-works/pi-coding-agent";
+import {
+	fuzzyFilter,
+	matchesKey,
+	SelectList,
+	type SelectItem,
+	visibleWidth,
+	type Component,
+	type TUI,
+	type EditorTheme,
+} from "@earendil-works/pi-tui";
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 // PI_MOUSE_CARET_DEBUG remains supported as a legacy alias.
 const DEBUG =
 	process.env.PI_EDITOR_PLUS_DEBUG === "1" || process.env.PI_MOUSE_CARET_DEBUG === "1";
 const debug = (message: string) => {
 	if (!DEBUG) return;
-	try { appendFileSync("/tmp/pi-editor-plus.log", `v${VERSION} ${message}\n`); } catch {}
+	try { fs.appendFileSync("/tmp/pi-editor-plus.log", `v${VERSION} ${message}\n`); } catch {}
 };
 
 const ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"; // press/release + button-motion + SGR
 const DISABLE_MOUSE = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 const CPR_QUERY = "\x1b[6n"; // "report cursor position" -> ESC[row;colR
 const SGR_MOUSE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+
 const CPR_REPLY = /^\x1b\[(\d+);(\d+)R$/;
+const ALT_MOVE_RE = /^(?:\x1b\x1b\[|\x1b\[1;3)([AB])$/; // alt+up / alt+down
+const CLICK_BURST_MS = 800; // match/slightly exceed desktop double-click interval
+const DRAFT_DEBOUNCE_MS = 2500;
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
 const LEFT = "\x1b[D";
@@ -247,11 +270,89 @@ function injectSelection(line: string, fromCol: number, toCol: number): string {
 	return out;
 }
 
+const DRAFT_FILE = path.join(getAgentDir(), "pi-editor-plus-draft.json");
+
+interface DraftFile {
+	text: string;
+	cursor: { line: number; col: number };
+	savedAt: number;
+}
+
+/** History-search overlay component (Ctrl+R). */
+class HistoryPicker implements Component {
+	private query = "";
+	private all: SelectItem[];
+	private list: SelectList;
+	private onPick: (value: string | undefined) => void;
+
+	constructor(all: string[], onPick: (value: string | undefined) => void) {
+		this.onPick = onPick;
+		this.all = all.map((text) => ({ value: text, label: text }));
+		this.list = this.buildList("");
+	}
+
+	private buildList(query: string): SelectList {
+		const matches = query ? fuzzyFilter(this.all, query, (item) => item.value) : this.all;
+		const list = new SelectList(matches.slice(0, 50), 10, getSelectListTheme());
+		list.onSelect = (item) => this.onPick(item.value);
+		list.onCancel = () => this.onPick(undefined);
+		return list;
+	}
+
+	private refilter(): void {
+		this.list = this.buildList(this.query);
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			this.onPick(undefined);
+			return;
+		}
+		if (matchesKey(data, "up") || matchesKey(data, "down") || matchesKey(data, "enter")) {
+			this.list.handleInput(data);
+			return;
+		}
+		if (matchesKey(data, "backspace")) {
+			this.query = this.query.slice(0, -1);
+			this.refilter();
+			return;
+		}
+		if (data.length > 0 && data[0] !== "\x1b" && !/[\x00-\x1f\u007f]/u.test(data)) {
+			this.query += data;
+			this.refilter();
+		}
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const queryLine = `search: ${this.query}`;
+		return [`── search history ──`.padEnd(width, "─"), queryLine, ...this.list.render(width)];
+	}
+}
+
 /**
  * Registry shared across /reload re-instantiations via globalThis, so a
  * fullscreen hook installed by a previous module instance keeps working.
  */
 const ACTIVE_EDITOR_KEY = Symbol.for("pi.editor-plus.activeEditor");
+
+interface Box<T> { current?: T }
+
+function uiHostRef(): Box<ExtensionUIContext> {
+	const store = globalThis as Record<symbol, Box<ExtensionUIContext>>;
+	if (!store[UI_HOST_KEY]) store[UI_HOST_KEY] = {};
+	return store[UI_HOST_KEY]!;
+}
+
+function historyProviderRef(): Box<() => string[]> {
+	const store = globalThis as Record<symbol, Box<() => string[]>>;
+	if (!store[HISTORY_KEY]) store[HISTORY_KEY] = {};
+	return store[HISTORY_KEY]!;
+}
+
+const UI_HOST_KEY = Symbol.for("pi.editor-plus.uiHost");
+const HISTORY_KEY = Symbol.for("pi.editor-plus.historyProvider");
 
 function activeEditorRef(): { current?: MouseCaretEditor } {
 	const store = globalThis as Record<symbol, { current?: MouseCaretEditor }>;
@@ -308,7 +409,7 @@ function installFullscreenHook(tui: TUI): void {
 class MouseCaretEditor extends CustomEditor {
 	private lastRenderedLines: string[] = [];
 	private mouseReported = false;
-	private pendingClick: { x: number; y: number } | undefined; // 1-based terminal coords
+	private pendingClick: { x: number; y: number; multiClick?: number } | undefined; // 1-based terminal coords
 	private boundsCache: { top: number; bottom: number } | undefined; // content rows, 1-based
 	private dragAnchorRow: number | undefined; // 1-based screen row of visual row 0, cached at press
 	private dragging = false;
@@ -318,8 +419,11 @@ class MouseCaretEditor extends CustomEditor {
 	private caretRedoStack: HistoryEntry[] = [];
 	private lastEditAt = 0;
 	private lastEditWasTyping = false;
-	/** Copy-feedback toast hook, assigned by the extension factory per session. */
-	reportCopied?: (chars: number) => void;
+	/** Footer-status toast hook, assigned by the extension factory per session. */
+	uiToast?: (message: string) => void;
+	/** Multi-click tracking for double/triple click word/line selection. */
+	private lastClickTrack: { ts: number; x: number; y: number; count: number } | undefined;
+	private draftTimer: ReturnType<typeof setTimeout> | undefined;
 	private readonly tuiRef: TUI;
 
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
@@ -435,12 +539,38 @@ class MouseCaretEditor extends CustomEditor {
 			if (this.dragging) this.finishDrag();
 			return true;
 		}
+		// Middle button (mouse middle-click / three-finger tap): paste primary selection.
+		const isMiddle = (button & 3) === 1;
+		if (isMiddle) {
+			const text = this.readPrimarySelection();
+			debug(`middle-click at ${x},${y} primary=${JSON.stringify(text)}`);
+			if (text) {
+				if (this.selectionRange()) this.deleteSelection();
+				this.insertTextAtCursor(text);
+				this.uiToast?.(`✓ pasted ${text.length} character${text.length === 1 ? "" : "s"}`);
+				this.tuiRef.requestRender();
+			}
+			return true;
+		}
 		if (isWheel || !isLeft) return true; // not ours: swallow in regular, unclaimed in fullscreen
 
 		if (this.isShowingAutocomplete()) {
 			debug("click ignored: autocomplete open");
 			return true;
 		}
+
+		// Multi-click detection: double = word select, triple = line select.
+		const nowMs = Date.now();
+		const prev = this.lastClickTrack;
+		const count =
+			prev && nowMs - prev.ts <= CLICK_BURST_MS && Math.abs(prev.x - x) <= 2 && Math.abs(prev.y - y) <= 2
+				? (prev.count % 3) + 1
+				: 1;
+		this.lastClickTrack = { ts: nowMs, x, y, count };
+		this.clearSelection();
+		this.pendingClick = { x, y, multiClick: count >= 2 ? count : undefined };
+		this.tuiRef.terminal.write(CPR_QUERY);
+		return true;
 
 		this.clearSelection();
 		this.pendingClick = { x, y };
@@ -458,7 +588,11 @@ class MouseCaretEditor extends CustomEditor {
 		const click = this.pendingClick;
 		this.pendingClick = undefined;
 		if (!click) return true; // stray report: swallow so it never reaches components
-		this.applyClick(click, caretRow);
+		if (click.multiClick) {
+			this.applyMultiClick(click, caretRow);
+		} else {
+			this.applyClick(click, caretRow);
+		}
 		return true;
 	}
 
@@ -561,7 +695,7 @@ class MouseCaretEditor extends CustomEditor {
 						...lines.slice(selection.line + 1, selection.endLine),
 						(lines[selection.endLine] ?? "").slice(0, selection.endCol),
 					].join("\n");
-		if (this.reportCopied) this.reportCopied(text.length);
+		this.uiToast?.(`✓ copied ${text.length} character${text.length === 1 ? "" : "s"}`);
 		void copyToClipboard(text).catch(() => {});
 	}
 
@@ -611,13 +745,40 @@ class MouseCaretEditor extends CustomEditor {
 			this.redoOnce();
 			return;
 		}
+		if (!this.isShowingAutocomplete()) {
+			if (matchesKey(data, "ctrl+r")) {
+				this.openHistorySearch();
+				return;
+			}
+			if (matchesKey(data, "ctrl+a")) {
+				this.selectAll();
+				return;
+			}
+			const altMove = ALT_MOVE_RE.exec(data);
+			if (altMove) {
+				this.moveLine(altMove[1] === "A" ? -1 : 1);
+				return;
+			}
+			// Ctrl+D duplicates the current line (only when there is text;
+			// on an empty editor Ctrl+D keeps its native exit behavior).
+			if (matchesKey(data, "ctrl+d") && this.getText().length > 0) {
+				this.duplicateLine();
+				return;
+			}
+		}
 		const before = this.snapshot();
 		const selection = this.selectionRange();
 		if (selection) {
 			const printable = data.length > 0 && data[0] !== "\x1b" && !/[\x00-\x1f\u007f]/u.test(data);
 			const isBackspace = matchesKey(data, "backspace");
 			const isDelete = matchesKey(data, "delete");
-			if (printable || isBackspace || isDelete) {
+			const isEnter = matchesKey(data, "enter") || matchesKey(data, "shift+enter") || data === "\x1b\r" || data === "\n";
+			const isPaste = data.includes("\x1b[200~");
+			if (isEnter) {
+				this.deleteSelection(); // GUI convention: Enter replaces selection with newline
+			} else if (isPaste) {
+				this.deleteSelection(); // paste replaces selection
+			} else if (printable || isBackspace || isDelete) {
 				this.deleteSelection();
 				if (isBackspace || isDelete) return; // the deletion was the edit
 			} else if (
@@ -663,6 +824,8 @@ class MouseCaretEditor extends CustomEditor {
 		}
 		this.lastEditAt = now;
 		this.lastEditWasTyping = isTyping;
+		if (after.length === 0) this.clearDraftFile();
+		else this.scheduleDraftSave();
 	}
 
 	private applyHistory(entry: HistoryEntry): void {
@@ -702,6 +865,196 @@ class MouseCaretEditor extends CustomEditor {
 		this.applyHistory(next);
 		debug(`redo -> ${JSON.stringify(next.cursor)} text=${next.text.length} chars`);
 		return true;
+	}
+
+	// =========================================================================
+	// Selection via keyboard / multi-click, line ops, history, draft
+	// =========================================================================
+
+	/** Walk the caret to an absolute logical position using arrow keys. */
+	private moveCaretTo(target: { line: number; col: number }): void {
+		const cursor = this.getCursor();
+		for (let i = 0; i < cursor.line - target.line; i++) super.handleInput(UP);
+		for (let i = 0; i < target.line - cursor.line; i++) super.handleInput(DOWN);
+		const after = this.getCursor();
+		const line = this.getLines()[target.line] ?? "";
+		const dx = graphemesBefore(line, target.col) - graphemesBefore(line, after.col);
+		for (let i = 0; i < Math.abs(dx); i++) super.handleInput(dx < 0 ? LEFT : RIGHT);
+	}
+
+	private setSelectionNormalized(a: { line: number; col: number }, b: { line: number; col: number }): void {
+		this.selection =
+			a.line < b.line || (a.line === b.line && a.col <= b.col)
+				? { line: a.line, col: a.col, endLine: b.line, endCol: b.col }
+				: { line: b.line, col: b.col, endLine: a.line, endCol: a.col };
+		this.tuiRef.requestRender();
+	}
+
+	private selectAll(): void {
+		const lines = this.getLines();
+		const lastLine = lines.length - 1;
+		this.selection = { line: 0, col: 0, endLine: lastLine, endCol: (lines[lastLine] ?? "").length };
+		this.moveCaretTo({ line: lastLine, col: (lines[lastLine] ?? "").length });
+		this.tuiRef.requestRender();
+	}
+
+	/** Double-click selects the word under the pointer; triple-click the whole line. */
+	private applyMultiClick(click: { x: number; y: number; multiClick?: number }, caretRow: number): void {
+		const count = click.multiClick!;
+		// The first press already moved the caret to the clicked cell, and pi keeps
+		// the caret correct at any terminal width. Use the CARET (not a re-mapped
+		// screen X) as the anchor for the word/line — robust across widths/wrapping.
+		const caret = this.getCursor();
+		const logical = this.getLines()[caret.line] ?? "";
+		let span: { s: number; e: number };
+		if (count >= 3) {
+			span = { s: 0, e: logical.length };
+		} else {
+			const at = Math.min(caret.col, Math.max(0, logical.length - 1));
+			const isWord = (ch: string) => /[\w@/.\-~]/u.test(ch);
+			const isSpace = (ch: string) => /\s/u.test(ch);
+			const cls = logical.length ? (isWord(logical[at]!) ? "w" : isSpace(logical[at]!) ? "s" : "p") : "s";
+			const same = (ch: string) => (cls === "w" ? isWord(ch) : cls === "s" ? isSpace(ch) : !isWord(ch) && !isSpace(ch));
+			let st = at;
+			while (st > 0 && logical[st - 1] !== undefined && same(logical[st - 1]!)) st--;
+			let en = at;
+			while (en < logical.length && logical[en] !== undefined && same(logical[en]!)) en++;
+			span = { s: st, e: Math.max(en, st + 1) };
+		}
+
+		this.selection = { line: caret.line, col: span.s, endLine: caret.line, endCol: span.e };
+		this.moveCaretTo({ line: caret.line, col: span.e });
+		if (span.e > span.s) {
+			this.uiToast?.(`✓ copied ${span.e - span.s} character${span.e - span.s === 1 ? "" : "s"}`);
+			void copyToClipboard(logical.slice(span.s, span.e)).catch(() => {});
+		}
+		this.tuiRef.requestRender();
+	}
+
+	/** Alt+Up/Down: swap the current logical line with its neighbor. */
+	private moveLine(dir: -1 | 1): void {
+		this.clearSelection();
+		const state = (this as unknown as { state: { lines: string[]; cursorLine: number; cursorCol: number; preferredVisualCol: number | null; snappedFromCursorCol: number | null } }).state;
+		const before = this.snapshot();
+		const l = state.cursorLine;
+		const t = l + dir;
+		if (t < 0 || t >= state.lines.length) return;
+		const tmp = state.lines[l]!;
+		state.lines[l] = state.lines[t]!;
+		state.lines[t] = tmp;
+		state.cursorLine = t;
+		state.cursorCol = Math.min(state.cursorCol, state.lines[t]!.length);
+		state.preferredVisualCol = null;
+		this.afterDirectEdit(before);
+	}
+
+	/** Ctrl+D: duplicate the current logical line below, caret moves to the copy. */
+	private duplicateLine(): void {
+		this.clearSelection();
+		const state = (this as unknown as { state: { lines: string[]; cursorLine: number; cursorCol: number; preferredVisualCol: number | null; snappedFromCursorCol: number | null } }).state;
+		const before = this.snapshot();
+		const l = state.cursorLine;
+		state.lines.splice(l + 1, 0, state.lines[l]!);
+		state.cursorLine = l + 1;
+		this.afterDirectEdit(before);
+	}
+
+	/** Shared tail for direct state edits: undo anchor, change notify, redraw. */
+	private afterDirectEdit(before: { text: string; cursor: { line: number; col: number } }): void {
+		this.caretUndoStack.push({ ...before, ts: Date.now(), hardBoundary: true });
+		if (this.caretUndoStack.length > MouseCaretEditor.MAX_HISTORY) this.caretUndoStack.shift();
+		this.caretRedoStack = [];
+		this.lastEditAt = Date.now();
+		this.lastEditWasTyping = false;
+		this.onChange?.(this.getText());
+		this.tuiRef.requestRender();
+	}
+
+	// =========================================================================
+	// Draft persistence (crash / accidental-clear recovery)
+	// =========================================================================
+
+	/** Read the X11/Wayland primary selection (middle-click source). Text only. */
+	private readPrimarySelection(): string | undefined {
+		const tryCmd = (cmd: string): string | undefined => {
+			try {
+				const out = execSync(cmd, { timeout: 600, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+				return out && !out.includes("\0") ? out : undefined;
+			} catch {
+				return undefined;
+			}
+		};
+		// Wayland first, then X11.
+		return tryCmd("wl-paste --primary --no-newline") ?? tryCmd("xclip -o -selection primary");
+	}
+
+	private scheduleDraftSave(): void {
+		if (this.draftTimer) clearTimeout(this.draftTimer);
+		this.draftTimer = setTimeout(() => this.writeDraftNow(), DRAFT_DEBOUNCE_MS);
+	}
+
+	private writeDraftNow(): void {
+		try {
+			const text = this.getText();
+			if (text.length === 0) {
+				fs.rmSync(DRAFT_FILE, { force: true });
+				return;
+			}
+			const draft: DraftFile = { text, cursor: { ...this.getCursor() }, savedAt: Date.now() };
+			fs.writeFileSync(DRAFT_FILE, JSON.stringify(draft));
+		} catch {}
+	}
+
+	flushDraft(): void {
+		if (this.draftTimer) clearTimeout(this.draftTimer);
+		this.writeDraftNow();
+	}
+
+	/** Restore a previous draft into an empty editor. Returns true when restored. */
+	restoreDraftIfAny(): boolean {
+		try {
+			if (this.getText().length > 0) return false;
+			const raw = fs.readFileSync(DRAFT_FILE, "utf8");
+			const draft = JSON.parse(raw) as DraftFile;
+			if (!draft.text) return false;
+			this.setText(draft.text);
+			this.moveCaretTo(draft.cursor);
+			this.tuiRef.requestRender();
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private clearDraftFile(): void {
+		if (this.draftTimer) clearTimeout(this.draftTimer);
+		try { fs.rmSync(DRAFT_FILE, { force: true }); } catch {}
+	}
+
+	/** Ctrl+R: fuzzy-searchable overlay over past user prompts. */
+	private openHistorySearch(): void {
+		const ui = uiHostRef().current;
+		const provider = historyProviderRef().current;
+		if (!ui || !provider) return;
+		const items = provider();
+		debug(`ctrl+r history items=${items.length} first=${JSON.stringify(items[0] ?? null)}`);
+		if (items.length === 0) {
+			this.uiToast?.("no prompt history yet");
+			return;
+		}
+		void ui
+			.custom<string | undefined>((tui, theme, keybindings, done) => new HistoryPicker(items, (value) => done(value)))
+			.then((picked) => {
+				if (!picked) return;
+				const before = this.snapshot();
+				this.selection = undefined;
+						this.setText(picked);
+				this.caretUndoStack.push({ ...before, ts: Date.now(), hardBoundary: true });
+				this.caretRedoStack = [];
+				this.moveCaretTo({ line: this.getLines().length - 1, col: (this.getLines()[this.getLines().length - 1] ?? "").length });
+				this.tuiRef.requestRender();
+			})
+			.catch(() => {});
 	}
 
 	/**
@@ -751,13 +1104,28 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 		debug("extension session_start");
 
-		// Terminal-style feedback after select-copy: brief footer status toast,
-		// auto-cleared so it never lingers. Assigned per-instance (a prototype
-		// assignment would be shadowed by the class field declaration).
+		uiHostRef().current = ctx.ui;
+		historyProviderRef().current = () => {
+			const seen = new Set<string>();
+			const out: string[] = [];
+			for (const entry of ctx.sessionManager.getBranch()) {
+				if (entry.type !== "message" || entry.message.role !== "user") continue;
+				const parts = entry.message.content;
+				const text = (typeof parts === "string"
+					? parts
+					: parts.map((part) => (part.type === "text" ? part.text : "")).join("")).trim();
+				if (!text || seen.has(text)) continue;
+				seen.add(text);
+				out.unshift(text); // oldest first -> newest last
+				if (out.length > 300) break;
+			}
+			return out;
+		};
+
 		let toastTimer: ReturnType<typeof setTimeout> | undefined;
-		const copiedToast = (chars: number) => {
+		const showToast = (message: string) => {
 			try {
-				ctx.ui.setStatus("pi-editor-plus", `✓ copied ${chars} character${chars === 1 ? "" : "s"}`);
+				ctx.ui.setStatus("pi-editor-plus", message);
 				if (toastTimer) clearTimeout(toastTimer);
 				toastTimer = setTimeout(() => {
 					try { ctx.ui.setStatus("pi-editor-plus", undefined); } catch {}
@@ -774,8 +1142,16 @@ export default function (pi: ExtensionAPI) {
 		let editor: MouseCaretEditor | undefined;
 		ctx.ui.setEditorComponent((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => {
 			editor = new MouseCaretEditor(tui, theme, keybindings);
-			editor.reportCopied = copiedToast;
+			editor.uiToast = showToast;
 			activeEditorRef().current = editor;
+			// Restore the draft AFTER interactive-mode's bind sequence finishes —
+			// it calls setText(currentText) (empty) right after the factory, which
+			// would wipe a synchronous restore.
+			setTimeout(() => {
+				if (!editor) return;
+				if (editor.restoreDraftIfAny()) showToast("draft recovered — ctrl+z dismisses");
+			}, 0);
+			if (editor.restoreDraftIfAny()) showToast("draft recovered — ctrl+z dismisses");
 			return editor;
 		});
 
@@ -793,6 +1169,7 @@ export default function (pi: ExtensionAPI) {
 
 		pi.on("session_shutdown", () => {
 			unsubscribe();
+			editor?.flushDraft();
 			editor?.shutdownMouse();
 		});
 	});
